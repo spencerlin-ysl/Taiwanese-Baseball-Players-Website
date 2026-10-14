@@ -1,7 +1,5 @@
-# TODO: fix the color of the font on the side bar to #bcbcbc and when hover #fffff
-# TODO: make the background color of the plot changeable by the mode of the site
-
-
+# TODO: finish get_fangraphs_dashboards function
+# TODO: get pbp data for the players from their debut years
 
 #
 # This is a Shiny web application. You can run the application by clicking
@@ -12,27 +10,38 @@
 #    https://shiny.posit.co/
 
 library(shiny)
+library(shinyWidgets)
 library(DT)
 library(bs4Dash)
 library(tidyverse)
 library(rvest)
+library(xml2)
+library(stringr)
+library(purrr)
 library(plotly)
 library(ggiraph)
+library(showtext)
+library(baseballr)
+library(jsonlite)
+library(httr)
+library(rlang)
 source("mlb_pbp_new.R")
-source("get_player_transactions.R")
-source("get_player_team_affiliate.R")
-source("get_game_log.R")
-source("get_pbp_data.R")
+source("get_player_transactions.r")
+source("get_player_team_affiliate.r")
+source("get_game_log.r")
+source("get_pbp_data.r")
+source("get_player_name.r")
 
 ui <- dashboardPage(
   
   # Header
+  dark = NULL,
   help = NULL,
   dashboardHeader(
-    title = dashboardBrand(
-      title = "Taiwanese Baseball Players"
-    ), 
-    status = "white"
+    title = span(span("台灣MLB體系球員", 
+                      style = "color: #bcbcbc; font-size: 24px; 
+                      padding-left: 20px; padding-top: 10px; 
+                      display: inline-block;"))
   ),
   
   # Sidebar
@@ -58,11 +67,10 @@ ui <- dashboardPage(
       textInput("search", "Search Players", placeholder = "Enter name...")
     ),
     
-    # Filter by position
+    # Toggle Language
     div(
       style = "padding: 15px;",
-      selectInput("position_filter", "Filter by Position",
-                  choices = c("All", "Pitcher", "Catcher", "Infielder", "Outfield"))
+      prettySwitch("language", "中/English", value = FALSE)
     )
   ),
   
@@ -70,9 +78,20 @@ ui <- dashboardPage(
   dashboardBody(
     tags$head(
       tags$style(HTML("
-        body, .content-wrapper, .main-sidebar, .sidebar-menu, .main-header,
+        body, .content-wrapper, .main-sidebar, .sidebar-menu,
         .navbar, .navbar-static-top, .logo, .modal-title {
           font-family: 'Book Antiqua', Palatino, serif !important;
+        }
+        
+        .main-header .brand-link, 
+        .main-header .brand-link span, 
+        .main-header .brand-link .brand-text {
+          color: #bcbcbc !important;
+          font-family: 'Book Antiqua', Palatino, serif !important;
+        }
+        
+        .main-header .brand-link:hover {
+          color: #ffffff !important;
         }
         
         .modal-content, .modal-content * {
@@ -139,10 +158,13 @@ ui <- dashboardPage(
           border-left: 4px solid #6e77db;
         }
         
+        .main-header {
+          display: none !important;
+        }
+        
         .main-sidebar {
           width: 250px;
-          background: #0e1012;
-          font-color: #bcbcbc; 
+          background: #282d33;
         }
         
         .sidebar-menu > li {
@@ -150,6 +172,18 @@ ui <- dashboardPage(
           margin-top: 3px;
         }
         
+        .sidebar-menu > li > a {
+          color: #bcbcbc !important;
+        }
+        
+        .sidebar-menu > li > a:hover {
+          color: #ffffff !important;
+        }
+        
+        .sidebar .shiny-input-container label {
+          color: #bcbcbc !important;
+        }
+
         .league-badge {
           display: inline-block;
           padding: 3px 8px;
@@ -173,6 +207,8 @@ ui <- dashboardPage(
       .modal-header .modal-title {
         font-size: 28px;
         font-weight: 600;
+        width: 100%;
+        flex: 1 1 auto;
       }
         
         /* Transaction table styling */
@@ -211,6 +247,13 @@ ui <- dashboardPage(
         background-color: #6e77db;
         text-align: center;
         color: white;
+      }
+      
+        /*make the game log table fixed headers show properly*/
+      .transactions-table table.dataTable thead th.dtfc-fixed-left,
+      .transactions-table table.dataTable thead th {
+        background-color: #6e77db ;
+        color: #ffffff ;
       }
       
       .transactions-table h2 {
@@ -273,6 +316,24 @@ ui <- dashboardPage(
       
       .modal-dialog {
         max-width: 900px;
+        height: 90vh;
+      }
+      
+      .modal-content {
+        height: 100%;
+        max-height: 90vh;
+        display: flex;
+        flex-direction: column;
+      }
+      
+      .modal-body {
+        overflow-y: hidden;
+      }
+      
+      .tab-scroll-container {
+        max-height: 65vh;
+        overflow-y: auto;
+        overflow-x: auto;
       }
       "))
     ),
@@ -346,64 +407,67 @@ ui <- dashboardPage(
 
 server <- function(input, output, session) {
   
+  player_info <- get_player_name()
+  
+  
   players_data <- player_info %>% 
-    select(id, full_name, level_abb, primary_position_name, team_name, photo_link, parent_org, org_rank)
+    select(id, full_name, level_abb, primary_position_name, team_name, photo_link, parent_org, org_rank, Mandarin, debut_year)
+  
   
   #Create a cache for transactions
   transactions_cache <- reactiveValues(data = list())
   # game_log_cache <- reactiveValues(data = list())
   
-  # Filter players based on search and position
+  # Filter players based on search
   filtered_players <- reactive({
     data <- players_data
     
     # Search filter
     if (!is.null(input$search) && input$search != "") {
-      data <- data[grepl(input$search, data$full_name, ignore.case = TRUE), ]
-    }
-    
-    # Position filter
-    if (!is.null(input$position_filter) && input$position_filter != "All") {
-      data <- data[data$primary_position_name == input$position_filter, ]
+      data <- data[grepl(input$search, data$full_name, ignore.case = TRUE) | 
+                     grepl(input$search, data$Mandarin, ignore.case = TRUE), ]
     }
     
     return(data)
   })
   
   # Create player buttons
-  create_player_buttons <- function(data) {
+  create_player_buttons <- function(data, language_toggle = input$language) {
     if (nrow(data) == 0) {
-      return(div(style = "padding: 20px; text-align: center; color: #999;",
-                 "No players found"))
+      return(div(style = "padding: 20px; text-align: center; color: #999;", "No players found"))
     }
     
     buttons <- lapply(1:nrow(data), function(i) {
-      league_text <- ifelse(
-        data$level_abb[i] == "MLB",
-        data$team_name[i], 
+      display_name <- if (isTRUE(language_toggle)) data$full_name[i] else data$Mandarin[i] 
+      
+      league_text <- if (data$level_abb[i] == "MLB") {
+        data$team_name[i]
+      } else {
         paste0(data$parent_org[i], " ", data$level_abb[i])
-      )
+      }
       
       if (!is.na(data$org_rank[i])) {
-        league_text <- paste0(league_text, " #", data$org_rank[i])
+        league_text <- paste(league_text, paste0("#", data$org_rank[i]))
       }
       
       actionButton(
         inputId = paste0("player_", i, "_", gsub(" ", "_", data$full_name[i])),
         label = tagList(
-          tags$img(src = data$photo_link[i], height = "150px", style = "display:block; margin: 0 auto 5px auto;"),
+          tags$img(src = data$photo_link[i], height = "150px", 
+                   style = "display:block; margin: 0 auto 5px auto;"),
           div(
-          style = "text-align:center;",
-          strong(data$full_name[i], style = "font-size: 20px;"),
-          br(),
-          span(class = "league-badge", league_text),
-          br(), 
-          span(class = "position-badge", data$primary_position_name[i]))
+            style = "text-align:center;",
+            strong(display_name, style = "font-size: 20px;"),
+            br(),
+            span(class = "league-badge", league_text),
+            br(),
+            span(class = "position-badge", data$primary_position_name[i])
+          )
         ),
         class = "player-button",
         onclick = sprintf(
-          "Shiny.setInputValue('selected_player_data', {name: '%s', id: '%s'}, {priority: 'event'})", 
-          data$full_name[i], data$id[i]
+          "Shiny.setInputValue('selected_player_data', {name: '%s', id: '%s', Mandarin: '%s', debut_year: '%s'}, {priority: 'event'})",
+          data$full_name[i], data$id[i], data$Mandarin[i], data$debut_year[i]
         )
       )
     })
@@ -502,6 +566,8 @@ server <- function(input, output, session) {
     req(input$selected_player_data)
     mlbam_id <- input$selected_player_data$id
     player_name <- input$selected_player_data$name
+    mandarin_name <- input$selected_player_data$Mandarin
+    player_debut_year <- input$selected_player_data$debut_year
     
     if (!dir.exists("cache")) dir.create("cache")
     
@@ -512,7 +578,7 @@ server <- function(input, output, session) {
       cache_path <- paste0("cache/game_log_", mlbam_id, ".rds")
     
       showModal(modalDialog(
-        title = player_name,
+        title = paste0(player_name, " (", mandarin_name, ")"),
         div(style = "text-align: center; padding: 20px;",
             icon("spinner", class = "fa-spin fa-3x"),
             h4("Loading...")
@@ -524,8 +590,8 @@ server <- function(input, output, session) {
         transactions_cache$data[[mlbam_id]] <- get_player_transactions(mlbam_id)
       }
       
-      game_logs <- get_game_log(player_name, player_info, 2025, 2025)
-      pbp_data <- get_pbp_data(player_name, player_info) %>% 
+      game_logs <- get_game_log(player_name, player_info, player_debut_year, get_current_season())
+      pbp_data <- get_pbp_data(player_name, player_info, player_debut_year, get_current_season()) %>% 
         mutate(across(
           any_of("hitData.coordinates.coordY"),
           ~ -.
@@ -543,55 +609,135 @@ server <- function(input, output, session) {
           }
         )
       
+      n_levels <- pbp_data_ordered$home_level_name_ordered %>% 
+        na.omit() %>% 
+        unique() %>% 
+        length()
+      
+      spray_plot_height <- max(500, n_levels * 500)
+      spray_plot_width  <- 700
+      
+      pbp_data_ordered <- pbp_data_ordered %>%
+        mutate(game_year = as.integer(format(as.Date(game_date), "%Y")))
+      
+      level_order_full <- c("Major League Baseball", "Triple-A", "Double-A", 
+                            "High-A", "Single-A", "Rookie")
+      
+      available_years <- sort(unique(pbp_data_ordered$game_year), decreasing = TRUE)
+      
+      current_season_year <- get_current_season()
+      default_year <- if (current_season_year %in% available_years) {
+        current_season_year
+      } else {
+        max(available_years, na.rm = TRUE)
+      }
+      
+      # highest level the player appeared at, within the default year only
+      levels_in_default_year <- pbp_data_ordered %>%
+        filter(game_year == default_year) %>%
+        pull(home_level_name) %>%
+        unique()
+      
+      default_level <- level_order_full[level_order_full %in% levels_in_default_year][1]
+      
       if (!("Message" %in% names(game_logs))) {
         saveRDS(game_logs, file = cache_path)
       }
       
-      transactions_html <- transactions_cache$data[[mlbam_id]]
+      updatePickerInput(
+        session = session,
+        inputId = paste0("year_filter_", mlbam_id),
+        choices = available_years,
+        selected = default_year
+      )
       
+      updatePickerInput(
+        session = session,
+        inputId = paste0("level_filter_", mlbam_id),
+        choices = unique(pbp_data$home_level_name),
+        selected = unique(pbp_data$home_level_name) #change to default_level if only want one level
+      )
+      
+      transactions_html <- transactions_cache$data[[mlbam_id]]
       spray_chart_id <- paste0("game_spray_chart_", mlbam_id)
       hover_id <- paste0("plot_hover_", mlbam_id)
       hover_info_id <- paste0("hover_info_", mlbam_id)
       
       showModal(modalDialog(
-        title = player_name,
+        # title = paste0(player_name, " (", mandarin_name, ")"),
+        title = div(
+          style = "display: flex; justify-content: space-between; align-items: center; width: 100%;",
+          span(paste0(player_name, " (", mandarin_name, ")")),
+          tags$button(
+            type = "button",
+            class = "btn btn-sm",
+            style = "background: none; border: none; font-size: 20px; line-height: 1; color: #999; cursor: pointer;",
+            `data-dismiss` = "modal",
+            HTML("&times;")
+          )
+        ),
         tabsetPanel(
           id = paste0("player_tabs_", mlbam_id),
           type = "tabs",
           tabPanel(
             "Game Logs",
             br(),
-            uiOutput(paste0("game_log_table_", mlbam_id)) 
+            fluidRow(
+              column(12, uiOutput(paste0("year_filter_ui_", mlbam_id)))
+            ),
+            div(
+              class = "tab-scroll-container",
+              uiOutput(paste0("game_log_table_", mlbam_id))
+            )
           ), 
           tabPanel(
             "Spray Chart", 
             br(),
             div(
-              style = "
-                min-height: 65vh;",
+              class = "tab-scroll-container",
+              style = "overflow-x: auto;",
               uiOutput(paste0("charts_ui_", mlbam_id))
             )
           ),
           tabPanel(
             "Strike Zone", 
             br(), 
-            div(
-              style = "
-                min-height: 65vh;",
-              girafeOutput(paste0("strike_zone_", mlbam_id), 
-                           height = "550px")
+            fluidRow(
+              column(width = 9, 
+                     div(
+                       style = "min-height: 65vh;",
+                       girafeOutput(paste0("strike_zone_", mlbam_id), 
+                                    height = "496px"))
+                    ),
+              column(width = 3, 
+                     div(
+                       style = "padding: 10px;",
+                       pickerInput(
+                         inputId = paste0("year_filter_", mlbam_id),
+                         label = "Filter by Year:",
+                         choices = NULL,
+                         selected = NULL,
+                         multiple = TRUE,
+                         options = pickerOptions(actionsBox = TRUE, selectAllText = "All"),
+                         width = '100%',
+                       ),
+                       pickerInput(
+                         inputId = paste0("level_filter_", mlbam_id),
+                         label = "Filter by Level:",
+                         choices = NULL,
+                         selected = NULL,
+                         multiple = TRUE,
+                         options = pickerOptions(actionsBox = TRUE, selectAllText = "All"),
+                         width = '100%',
+                       ))
+                     )
             )
           ),
           tabPanel(
             "Transactions",
             br(),
             div(
-              style = "
-                max-height: 65vh;
-                overflow-y: auto;
-                overflow-x: hidden;
-                padding-right: 10px;
-              ",
+              class = "tab-scroll-container",
               htmlOutput("transactions_html")
             )
           )
@@ -599,7 +745,7 @@ server <- function(input, output, session) {
         size = "l",
         class = "transactions-table",
         easyClose = TRUE,
-        footer = modalButton("Close")
+        footer = NULL
       ))
       
       output$transactions_html <- renderUI({
@@ -619,8 +765,23 @@ server <- function(input, output, session) {
         }
           
         game_logs_formatted <- game_logs %>% 
-          select(-any_of("gamedate")) %>% 
+          mutate(Year = as.integer(format(as.Date(Date), "%Y"))) %>%
+          select(Year, everything()) %>%
+          select(1:match("gamedate", names(.)) - 1) %>% 
+          select(-any_of(c("G", "QS", "CG", "ShO", "SV"))) %>% 
+          select(Year, Date, Level, everything()) %>% 
           arrange(desc(Date))
+        
+        output[[paste0("year_filter_ui_", mlbam_id)]] <- renderUI({
+          years <- unique(game_logs_formatted$Year)
+          selectInput(
+            inputId = paste0("year_select_", mlbam_id),
+            label = "Select Year:",
+            choices = c("All", sort(years, decreasing = TRUE)),
+            selected = max(years),
+            width = "150px"
+          )
+        })
         
         cols_round_2 <- c("ERA", "FIP", "WHIP", "K/9", "BB/9", "HR/9", "K/BB", "BB/K", "Spd", "wRC", "wRAA", "wBsR")
         cols_round_3 <- c("AVG", "OBP", "SLG", "OPS", "ISO", "BABIP", "wOBA") 
@@ -648,26 +809,39 @@ server <- function(input, output, session) {
           }
         }
         
+        filtered_log <- reactive({
+          req(input[[paste0("year_select_", mlbam_id)]])
+          selected_year <- input[[paste0("year_select_", mlbam_id)]]
+          
+          if (selected_year == "All") {
+            return(game_logs_formatted)
+          } else {
+            return(game_logs_formatted %>% filter(Year == selected_year))
+          }
+        })
+        
         output[[paste0("game_log_table_dt_", mlbam_id)]] <- DT::renderDataTable({
           DT::datatable(
-            game_logs_formatted,
+            filtered_log(),
+            filter = 'none',
+            extensions = "FixedColumns",
             options = list(
               scrollX = TRUE, 
-              scrollY = "400px",
-              pageLength = 100,
+              scrollY = "47vh",
+              pageLength = 25,
               lengthMenu = c(10, 25, 50, 100), 
               dom = 'tp',        # Layout: Buttons, filter, table, info, pagination
-              fixedHeader = TRUE,
+              fixedColumns = list(leftColumns = 2),
               autoWidth = FALSE,
               columnDefs = list(
+                list(visible = FALSE, targets = 0),
                 list(className = 'dt-center', targets = '_all', filter = 'none'), 
-                list(width = '150px', targets = 0),
-                list(width = '80px', targets = 1:(ncol(game_logs_formatted)-1))
+                list(width = '150px', targets = 1),
+                list(width = '80px', targets = 2:(ncol(game_logs_formatted)-1))
               )
             ),
-            rownames = FALSE,        # Hide row numbers
-            class = 'cell-border stripe hover',  # Styling classes
-            filter = 'none'           # Add column filters at the top
+            rownames = FALSE,
+            class = 'cell-border stripe hover nowrap',  # Styling classes
           )
         })
         return(DT::dataTableOutput(paste0("game_log_table_dt_", mlbam_id)))  
@@ -686,10 +860,11 @@ server <- function(input, output, session) {
                      fill_value = 'result.event_ordered', 
                      fill_palette = bb_palette, 
                      point_size = 3) +
-          facet_wrap(~home_level_name) +
-          labs(title = paste0(player_name, ' Batted Balls 2025')) + 
-          facet_wrap(~home_level_name_ordered)
-      })
+          facet_wrap(~home_level_name, ncol = 1) +
+          labs(title = paste0(player_name, ' Batted Balls ', format(Sys.Date(), "%Y"))) + 
+          facet_wrap(~home_level_name_ordered, ncol = 1) + 
+          theme(text = element_text(family = "serif"))
+      }, height = spray_plot_height, width = spray_plot_width)
       
       output[[hover_info_id]] <- renderText({
         hover <- input[[hover_id]]
@@ -697,7 +872,10 @@ server <- function(input, output, session) {
 
         point <- nearPoints(pbp_data_ordered, hover, threshold = 20, maxpoints = 1)
         if(nrow(point) == 0) return("")
+
         paste0(
+          "\n",
+          "\n",
           "Event: ", point$result.event_ordered, "\n",
           "LA: ", round(point$hitData.launchAngle, 1), "°\n",
           "EV: ", round(point$hitData.launchSpeed, 1), " mph\n", 
@@ -713,15 +891,28 @@ server <- function(input, output, session) {
               p(game_logs$Message[1])
           )
         } else {
-          tagList(
-            plotOutput(spray_chart_id, hover = hoverOpts(
-              id = hover_id)),
-            verbatimTextOutput(hover_info_id)
+          fluidRow(
+            column(
+              width = 8,
+              plotOutput(
+                spray_chart_id,
+                hover = hoverOpts(id = hover_id),
+                width = paste0(spray_plot_width, "px"),
+                height = paste0(spray_plot_height, "px")
+              )
+            ),
+            column(
+              width = 4,
+              div(style = "font-size: 20px",
+                verbatimTextOutput(hover_info_id))
+            )
           )
         }
       })
       
       output[[paste0("strike_zone_", mlbam_id)]] <- renderGirafe({
+        req(input[[paste0("year_filter_", mlbam_id)]])
+        req(input[[paste0("level_filter_", mlbam_id)]])
         
         if ("Message" %in% names(game_logs)) {
           div(style = "text-align: center; color: #999; 
@@ -752,19 +943,36 @@ server <- function(input, output, session) {
           pitch_types_in_data <- names(pitch_type_colors)[names(pitch_type_colors) %in% unique(pbp_data$details.type.description)]
           
           pbp_data_by_pitch_type <- pbp_data %>%
+            mutate(
+              calc_pX = (116.75 - as.numeric(pitchData.coordinates.x)) / 38.1,
+              final_pX = coalesce(as.numeric(pitchData.coordinates.pX), calc_pX),
+
+              calc_pZ = (237.9 - as.numeric(pitchData.coordinates.y)) / 26.75,
+              final_pZ = coalesce(as.numeric(pitchData.coordinates.pZ), calc_pZ), 
+              
+              final_pZ = if_else(
+                home_level_name == "Rookie" & final_pZ < 0, 
+                final_pZ + 5.91,
+                final_pZ
+              )
+            ) %>% 
             mutate(.ptype = as.character(details.type.description)) %>%
             mutate(.ptype_key = match(.ptype, pitch_types_in_data)) %>%
             arrange(.ptype_key, row_number()) %>%
             select(-.ptype_key)
           
-          k_zone_plot <- ggplot(pbp_data_by_pitch_type, aes(pitchData.coordinates.pX, pitchData.coordinates.pZ)) +
+          plot_data <- pbp_data_by_pitch_type %>%
+            filter(home_level_name %in% input[[paste0("level_filter_", mlbam_id)]],
+                   substr(game_date, 1, 4) %in% input[[paste0("year_filter_", mlbam_id)]])
+          
+          k_zone_plot <- ggplot(plot_data, aes(final_pX, final_pZ)) +
             geom_polygon(data = home_plate_coords, aes(x = x, y = z),
                          fill = "lightgray", color = "darkgray", size = 0.25) +
             geom_point_interactive(aes(`data-id` = details.type.description, 
                                        color = details.type.description, 
                                        data_id = details.type.description), 
                                    extra_interactive_params = "data-id", 
-                                   size = 0.5) + 
+                                   size = 0.75) + 
             scale_color_manual_interactive(extra_interactive_params = "data-id", 
                                            `data-id` = unique(pbp_data_by_pitch_type$details.type.description), 
                                            values = pitch_type_colors, 
@@ -772,7 +980,7 @@ server <- function(input, output, session) {
                                            data_id = function(breaks) as.character(breaks)) + 
             coord_equal() + 
             scale_x_continuous("Horizontal location(ft.)", 
-                               limits = c(-2.5, 2.5)) + 
+                               limits = c(-2.5, 2.5), expand = c(0,0)) + 
             scale_y_continuous("Vertical location(ft.)") + 
             theme_classic() + 
             guides(color = guide_legend_interactive(title = "Pitch Type", override.aes = list(size = 3)))

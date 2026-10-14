@@ -1,8 +1,8 @@
 # Taiwan_MLB_players/
-team_mapping <- read_csv("MLB teams minor affiliates.csv") %>% 
+team_mapping <- read_csv("data/MLB teams minor affiliates.csv") %>% 
   pivot_longer(cols = c(DSL1, DSL2), names_to = "DSL_slot", values_to = "DSL", values_drop_na = TRUE)
 
-get_pbp_data <- function(player_name, player_info, startSeason = 2025, endSeason = 2025) {
+get_pbp_data <- function(player_name, player_info, startSeason, endSeason) {
   
   game_log <- get_game_log(player_name, player_info, startSeason, endSeason)
   
@@ -16,8 +16,8 @@ get_pbp_data <- function(player_name, player_info, startSeason = 2025, endSeason
   pbp_file_path <- file.path(cache_dir, paste0("pbp_", mlbam_id, ".rds"))
   
   level_mapping <- tibble(
-    Level = c("(MLB)", "(AAA)", "(AA)", "(A+)", "(A)", "(CPX)", "(DSL)"),
-    level_ids = c(1, 11, 12, 13, 14, 16, 16)
+    Level = c("(MLB)", "(AAA)", "(AA)", "(A+)", "(A)", "(CPX)", "(DSL)", "(R)"),
+    level_ids = c(1, 11, 12, 13, 14, 16, 16, 16)
   )
   
   if ("Message" %in% names(game_log)) {
@@ -91,6 +91,7 @@ get_pbp_data <- function(player_name, player_info, startSeason = 2025, endSeason
     unique()
 
   taiwan_game_pks <- new_game_pks %>%
+    filter(gameType == "R") %>%
     filter(teams.home.team.name %in% milb_teams |
              teams.away.team.name %in% milb_teams | 
              teams.home.team.name %in% mlb_teams | 
@@ -137,9 +138,8 @@ get_pbp_data <- function(player_name, player_info, startSeason = 2025, endSeason
 
 # temp <- get_pbp_data("Chih-Jung Liu", player_info)
 # temp_game_log <- readRDS("Taiwan_MLB_players/cache/game_log_691907.rds")
-# temp_pbp <- readRDS("Taiwan_MLB_players/cache/pbp_691907.rds")
+# temp_pbp <- readRDS('Taiwan_MLB_players/cache/pbp_808207.rds')
 # temp_game_log <- get_game_log("Nien-Hsi Yang", player_info)
-# temp <- mlb_pbp(811449)
+# temp <- mlb_pbp(788615)
 # temp$matchup.pitcher.fullName
-# games <- mlb_game_pks(date = '2025-08-08',
-#                       level_ids = c(16))
+# games <- mlb_game_pks(date = '2018-06-20', level_ids = c(16))

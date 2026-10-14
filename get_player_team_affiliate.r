@@ -1,8 +1,3 @@
-library(httr)
-library(jsonlite)
-library(dplyr)
-library(rlang)
-
 get_player_team_affiliate <- function(mlbam_id) {
   url <- paste0("https://statsapi.mlb.com/api/v1/people/", mlbam_id, "?hydrate=currentTeam,team,stats(type=[yearByYear,yearByYearAdvanced,careerRegularSeason,careerAdvanced,availableStats](team(league)),leagueListId=mlb_milb)&site=en")
   
