@@ -1,0 +1,10 @@
+name: taiwan_mlb_players
+title:
+username: spencerlin-ysl
+account: spencerlin-ysl
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 15923191
+bundleId: 11739575
+url: https://spencerlin-ysl.shinyapps.io/taiwan_mlb_players/
+version: 1

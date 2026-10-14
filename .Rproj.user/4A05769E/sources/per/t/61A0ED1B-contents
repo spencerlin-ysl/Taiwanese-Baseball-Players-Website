@@ -1,0 +1,266 @@
+library(baseballr)
+library(tidyverse)
+library(purrr)
+
+# https://www.reddit.com/r/Sabermetrics/comments/1in64cj/milb_data_with_baseballr/
+
+setwd("/Users/spencerlin/Documents/My projects/Taiwan Baseball Players")
+
+# Get player_info for app to use
+player_ids <- chadwick_player_lu()
+
+### test <- mlb_people(player_ids$key_mlbam)$birth_country == "Taiwan"
+  
+
+taiwan_player_ids <- player_ids %>% 
+  filter(key_bbref_minors %in% c("lin---007wei", "cheng-000tsu", "teng--000kai", 
+                                 "liu---001chi", "chen--001po-", "lee---000hao", 
+                                 "zhuang000che", "lin---001yu-", "chang-001hun", 
+                                 "lee---006che", "pan---000wen", "sha---000tzu", 
+                                 "lin---002she", "lin---006che", "ko----000chi", 
+                                 "shen--000chi", "yang--000nie", "huang-002chu", 
+                                 "lin---002po-", "lin---002cha"
+  )) %>% 
+  mutate(name_full = paste0(name_first, " ", name_last))
+
+player_info <- mlb_people(taiwan_player_ids$key_mlbam) %>% 
+  mutate(photo_link = paste0(
+    "https://img.mlbstatic.com/mlb-photos/image/upload/c_fill,g_auto/w_180/v1/people/",
+    id,  # mlbam id column from mlb_people()
+    "/headshot/milb/current")
+  ) %>%
+  rowwise() %>%
+  mutate(
+    team_info = list(get_player_team_affiliate(id)),
+    team_name = team_info$team_name,
+    level     = team_info$level,
+    parent_org = team_info$team_parentorg
+  ) %>%
+  ungroup() %>% 
+  mutate(level_abb = case_when(
+    level == "Major League Baseball" ~ "MLB",
+    level == "Triple-A"              ~ "AAA",
+    level == "Double-A"              ~ "AA",
+    level == "High-A"                ~ "A+",
+    level == "Single-A"              ~ "A",
+    level == "Rookie"                ~ "Rk",
+    level == "Winter Leagues"        ~ "AFL",
+    TRUE                            ~ NA_character_ 
+  ))
+
+# Organization Ranking
+taiwan_org_rank <- function(){
+  url = "https://www.fangraphs.com/prospects/the-board/2025-in-season-prospect-list?sortcol=13&sortdir=desc&search=taiwan"
+  webpage <- read_html(url)
+  
+  tables <- webpage %>%
+    html_elements("table") %>%
+    html_table()
+  
+  return(tables[[9]])
+}
+
+taiwan_org_rank <- taiwan_org_rank() %>% 
+  mutate(full_name = str_squish(NameName)) %>% 
+  rename(org_rank = `Org RkRank withinteam's farm system`) %>% 
+  select(-NameName)
+
+write_csv(taiwan_org_rank, "taiwan_org_rank.csv")
+
+# join data back to player_info
+player_info <- player_info %>%
+  mutate(full_name = full_name) %>% 
+  left_join(
+    taiwan_org_rank %>%
+      select(full_name, org_rank),
+    by = "full_name"
+  )
+
+write_csv(player_info, "player_info.csv")
+
+
+  
+
+
+
+# Obtain pitch by pitch data
+taiwan_game_logs <- map_dfr(taiwan_player_ids$key_mlbam, 
+                            ~mlb_game_logs_batter(.x, year = 2025))
+
+
+fg_minors_batters <- function(startSeason,endSeason){
+  url = paste0("https://www.fangraphs.com/api/leaders/minor-league/data?pos=all&level=0&lg=2,4,5,6,7,8,9,10,11,14,12,13,15,16,17,18,30,32&stats=bat&qual=0&type=0&team=0,to&season=",startSeason,"&seasonEnd=",endSeason,"&org=&ind=0&splitTeam=true")
+  fgRaw <- httr::GET(url)
+  fgData<-jsonlite::fromJSON(rawToChar(fgRaw$content))
+  return(fgData)
+}
+
+fg_minors_pitchers <- function(startSeason,endSeason){
+  url = paste0("https://www.fangraphs.com/api/leaders/minor-league/data?pos=all&level=0&lg=2,4,5,6,7,8,9,10,11,14,12,13,15,16,17,18,30,32&stats=pit&qual=0&type=0&team=0,to&season=",startSeason,"&seasonEnd=",endSeason,"&org=&ind=0&splitTeam=true")
+  fgRaw <- httr::GET(url)
+  fgData<-jsonlite::fromJSON(rawToChar(fgRaw$content))
+  return(fgData)
+}
+
+taiwan_batters <- fg_minors_batters(2025,2025) %>% 
+  filter(PlayerName %in% player_info$full_name)
+
+taiwan_batters_log <- map_dfr(unique(taiwan_batters$minormasterid), 
+                              ~fg_milb_batter_game_logs(.x, 2025))
+
+taiwan_batters_log <- map_dfr(unique(taiwan_batters$PlayerName), 
+                              ~get_game_log(.x, player_info, 2025, 2025))
+
+# temp <- fg_milb_batter_game_logs("sa3017863", 2025)
+
+taiwan_pitchers <- fg_minors_pitchers(2025, 2025) %>% 
+  filter(PlayerName %in% player_info$full_name)
+
+taiwan_pitchers_log <- map_dfr(taiwan_pitchers$minormasterid, 
+                               ~fg_milb_pitcher_game_logs(.x, 2025))
+
+
+team_mapping <- read_csv("MLB teams minor affiliates.csv")
+
+milb_to_mlb <- team_mapping %>%
+  pivot_longer(cols = -c(MLB_abbr, DSL_slot), 
+               names_to = "level", 
+               values_to = "milb_team") %>%
+  filter(!is.na(milb_team) & milb_team != "") %>%
+  dplyr::select(MLB_abbr, milb_team, level) %>% 
+  mutate(Level_b = paste0("(", level, ")"))
+
+taiwan_mlb_teams <- taiwan_batters_log %>%
+  dplyr::select(Team, Level) %>%
+  distinct()
+
+taiwan_milb_teams <- taiwan_mlb_teams %>%  # Your Team-Level pairs
+  left_join(milb_to_mlb, by = c("Team" = "MLB_abbr", "Level" = "Level_b")) %>%
+  filter(!is.na(milb_team)) %>%
+  pull(milb_team) %>%
+  unique()
+
+level_mapping <- tibble(
+  Level = c("(AAA)", "(AA)", "(A+)", "(A)", "(CPX)"),
+  level_ids = c(11, 12, 13, 14, 16)
+)
+
+all_taiwan_dates <- taiwan_batters_log %>%
+  dplyr::select(Date, Team, Level) %>% 
+  distinct() %>% 
+  left_join(level_mapping, by = "Level") %>% 
+  arrange(Date)
+
+all_game_pks <- pmap_dfr(list(all_taiwan_dates$Date, 
+                              all_taiwan_dates$level_ids),
+                         ~get_game_pks_mlb(date = ..1, level_ids = ..2))
+
+
+
+taiwan_game_pks <- all_game_pks %>%
+  filter(teams.home.team.name %in% taiwan_milb_teams | 
+           teams.away.team.name %in% taiwan_milb_teams)
+
+batter_data <- map(.x = taiwan_game_pks %>%
+                    filter(status.codedGameState == "F") %>% 
+                    pull(game_pk), 
+                  ~mlb_pbp(game_pk = .x)) %>%
+  map('result') %>%
+  bind_rows()
+
+cheng_game_pks <- taiwan_game_pks %>% 
+  filter(teams.home.team.name == "Indianapolis Indians" | 
+           teams.away.team.name == "Indianapolis Indians")
+
+ko_game_pks <- taiwan_game_pks %>% 
+  filter(teams.home.team.name %in% c("ACL Dodgers", "Rancho Cucamonga Quakes") | 
+           teams.away.team.name %in% c("ACL Dodgers", "Rancho Cucamonga Quakes"))
+
+ko_data <- ko_game_pks %>%
+  filter(status.codedGameState == "F") %>%
+  pull(game_pk) %>%
+  map_dfr(~ get_pbp_mlb(game_pk = .x))
+
+ko_pbp <- ko_data %>% 
+  filter(matchup.batter.id == taiwan_player_ids %>% filter(name_last == "Ko") %>% pull(key_mlbam))
+
+bb_palette <- c('Single' = "#006BA4",
+                'Double' = "#A2CEEC", 
+                'Triple'= "#FFBC79", 
+                'Home Run'= "#C85200", 
+                'Out/Other' = "#595959")
+
+ggspraychart(temp_lee, 
+             x_value = 'hitData.coordinates.coordX', 
+             y_value = '-hitData.coordinates.coordY', 
+             fill_value = 'result.event', 
+             fill_palette = bb_palette, 
+             point_size = 3, 
+             density = TRUE) +
+  facet_wrap(~home_level_name) +
+  labs(title = 'Ko Batted Balls 2025') +
+  facet_wrap(~home_level_name)
+
+baseballr:::mlb_stats_endpoint
+
+temp_lee <- readRDS("/Users/spencerlin/Documents/My projects/Taiwan Baseball Players/Taiwan_MLB_players/cache/pbp_701678.rds")
+
+
+
+
+home_plate_coords <- data.frame(
+  x = c(-0.7083, -0.95, 0.0000, 0.95, 0.7083),
+  z = c(0.125, -0.38, -0.6, -0.38, 0.125)
+)
+
+most_common_zone <- temp_lee %>%
+  group_by(pitchData.strikeZoneTop, pitchData.strikeZoneBottom) %>%
+  summarise(n = n(), .groups = 'drop') %>%
+  arrange(desc(n)) %>%
+  slice(1)
+
+pitch_type_colors <- c(`Four-Seam Fastball` = "#d22d49", Fastball = "#d22d49", 
+                       Sinker = "#ca6a04", Cutter = "#933f2c", 
+                       Changeup = "#1dbe3a", Splitter = "#3bacac", Forkball = "#55ccab", Screwball = "#60DB33",
+                       Curveball = "#00d1ed", `Knuckle Curve` = "#6236cd", `Slow Curve` = "#0068ff", 
+                       Slider = "#c3bd0e", Sweeper = "#ddb33a", Slurve = "#93afd4",
+                       `Knuckle Ball` = "#3c44cd", 
+                       Eephus = "#888", `NA` = "#888")
+
+pitch_types_in_data <- names(pitch_type_colors)[names(pitch_type_colors) %in% unique(temp_lee$details.type.description)]
+
+temp_lee_ordered <- temp_lee %>%
+  mutate(.ptype = as.character(details.type.description)) %>%
+  mutate(.ptype_key = match(.ptype, pitch_types_in_data)) %>%
+  arrange(.ptype_key, row_number()) %>%
+  select(-.ptype_key)
+
+
+k_zone_plot <- ggplot(temp_lee_ordered, aes(pitchData.coordinates.pX, pitchData.coordinates.pZ)) +
+  geom_polygon(data = home_plate_coords, aes(x = x, y = z),
+               fill = "lightgray", color = "darkgray", size = 0.25) +
+  geom_point_interactive(aes(`data-id` = details.type.description, 
+                             color = details.type.description, data_id = details.type.description), extra_interactive_params = "data-id", size = 0.5) + 
+  scale_color_manual_interactive(extra_interactive_params = "data-id", 
+                                 `data-id` = unique(temp_lee_ordered$details.type.description), 
+                                 values = pitch_type_colors, 
+                                 data_id = function(breaks) as.character(breaks)) + 
+  geom_rect(xmin = -0.7083, xmax = 0.7083,
+            ymin = most_common_zone$pitchData.strikeZoneBottom, 
+            ymax = most_common_zone$pitchData.strikeZoneTop, 
+            fill = "lightgray", alpha = 0.01, color = "black", size = 0.25) + 
+  coord_equal() + 
+  scale_x_continuous("Horizontal location(ft.)", 
+                     limits = c(-2.5, 2.5)) + 
+  scale_y_continuous("Vertical location(ft.)") + 
+  theme_classic() + 
+  guides(color = guide_legend_interactive(title = "Pitch Type", override.aes = list(size = 3)))
+
+
+
+k_zone_plot = girafe(ggobj = k_zone_plot)
+k_zone_plot = girafe_options(k_zone_plot,
+                   opts_hover(girafe_css("opacity:1")),
+                   opts_hover_inv(css = "opacity:0.1;"))
+print(k_zone_plot)
+
