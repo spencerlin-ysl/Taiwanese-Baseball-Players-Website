@@ -4,7 +4,7 @@
 
 Track Taiwanese players in MLB and MiLB with detailed statistics, spray charts, game logs, and transaction history.
 
-[Launch App →](https://YOUR_USERNAME.shinyapps.io/Taiwan_MLB_players/)
+[Launch App →](https://spencerlin-taiwanese-baseball-players.share.connect.posit.cloud/)
 
 Features
 --------
