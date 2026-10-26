@@ -2,26 +2,62 @@
 team_mapping <- read_csv("data/MLB teams minor affiliates.csv") %>% 
   pivot_longer(cols = c(DSL1, DSL2), names_to = "DSL_slot", values_to = "DSL", values_drop_na = TRUE)
 
+milb_to_mlb <- team_mapping %>%
+  pivot_longer(cols = -c(MLB_abbr, DSL_slot),
+               names_to = "level",
+               values_to = "milb_team") %>%
+  filter(!is.na(milb_team) & milb_team != "") %>%
+  dplyr::select(MLB_abbr, milb_team, level) %>%
+  mutate(Level_b = paste0("(", level, ")"))
+
+level_mapping <- tibble(
+  Level = c("(MLB)", "(AAA)", "(AA)", "(A+)", "(A)", "(CPX)", "(DSL)", "(R)"),
+  level_ids = c(1, 11, 12, 13, 14, 16, 16, 16)
+)
+
 get_pbp_data <- function(player_name, player_info, startSeason, endSeason) {
   
   game_log <- get_game_log(player_name, player_info, startSeason, endSeason)
+  if ("Message" %in% names(game_log)) {
+    return(game_log)
+  }
   
-  mlbam_id <- player_info %>% 
-    filter(full_name == player_name) %>% 
-    pull(id)
+  player_row <- player_info %>% 
+    filter(full_name == player_name)
+  mlbam_id   <- player_row$id
+  is_pitcher <- player_row$primary_position_name == "Pitcher"
   
   cache_dir <- "cache"
   dir.create(cache_dir, showWarnings = FALSE)
-  file_path <- file.path(cache_dir, paste0("game_log_", mlbam_id, ".rds"))
   pbp_file_path <- file.path(cache_dir, paste0("pbp_", mlbam_id, ".rds"))
+  season_cap    <- as.Date(paste0(get_current_season(), "-09-30"))
   
-  level_mapping <- tibble(
-    Level = c("(MLB)", "(AAA)", "(AA)", "(A+)", "(A)", "(CPX)", "(DSL)", "(R)"),
-    level_ids = c(1, 11, 12, 13, 14, 16, 16, 16)
-  )
+  # Save updated cache
+  finish <- function(data) {
+    data <- save_with_stamp(data, pbp_file_path)
+    message("💾 Saved PBP data to ", pbp_file_path)
+    data
+  }
   
-  if ("Message" %in% names(game_log)) {
-    return(game_log)
+  cached_data <- NULL
+  if (file.exists(pbp_file_path)) {
+    cached_data <- readRDS(pbp_file_path)
+    
+    # deployed app: always trust the committed cache
+    if (Sys.getenv("CACHE_ONLY") == "1") {
+      message("✅ CACHE_ONLY: using ", pbp_file_path)
+      return(cached_data)
+    }
+    
+    stamp <- attr(cached_data, "fetched_at")
+    if (!is.null(stamp)) {
+      age <- as.numeric(difftime(Sys.time(), stamp, units = "hours"))
+      final_for_season <- Sys.Date() > season_cap && as.Date(stamp) > season_cap
+      if (age < 24 || final_for_season) {
+        message("✅ Using cached PBP data (", round(age, 2), " hours old)")
+        return(cached_data)
+      }
+    }
   }
   
   all_game_dates <- game_log %>%
@@ -30,109 +66,77 @@ get_pbp_data <- function(player_name, player_info, startSeason, endSeason) {
     left_join(level_mapping, by = "Level") %>% 
     arrange(Date)
   
-  # Check if cache exists and determine which dates to fetch
-  if (file.exists(pbp_file_path)) {
-    file_age <- difftime(Sys.time(), file.info(pbp_file_path)$mtime, units = "hours")
+  if (!is.null(cached_data) && nrow(cached_data) > 0) {
+    cache_date <- max(as.Date(cached_data$game_date), na.rm = TRUE)
+    message("🔄 Cache is stale. Fetching games from ", cache_date, " onward...")
     
-    if (file_age < 24) {
-      message("✅ Using cached PBP data (", round(file_age, 2), " hours old)")
-      return(readRDS(pbp_file_path))
-    }
-    
-    if ("Message" %in% names(game_log)) {
-      return(readRDS(file_path))
-    }
-    
-    # Cache is stale - only fetch NEW games
-    message("🔄 Cache is ", round(file_age, 2), " hours old. Fetching new games only...")
-    cached_data <- readRDS(file_path)
-    cache_date <- max(cached_data$Date)
-    
-    # Only get games after the cache date
     dates_to_fetch <- all_game_dates %>% 
-      filter(as.Date(Date) > as.Date(cache_date))
+      filter(as.Date(Date) >= cache_date)
     
     if (nrow(dates_to_fetch) == 0) {
       message("✅ No new games since last cache")
-      return(readRDS(pbp_file_path))
+      return(finish(cached_data))
     }
-    
-    message("📅 Fetching ", nrow(dates_to_fetch), " new game date(s)...")
-    
   } else {
-    # No cache - fetch all games
-    message("🔄 No pbp cache found. Fetching all games...")
-    cached_data <- NULL
+    message("🔄 No usable PBP cache. Fetching all games...")
     dates_to_fetch <- all_game_dates
   }
   
   # Fetch game PKs for the dates we need
-  new_game_pks <- pmap_dfr(
-    list(dates_to_fetch$Date, dates_to_fetch$level_ids),
-    ~mlb_game_pks(date = ..1, level_ids = ..2)
-  )
+  new_game_pks <- dates_to_fetch %>% 
+    distinct(Date, level_ids) %>% 
+    pmap_dfr(\(Date, level_ids) {
+      tryCatch(
+        mlb_game_pks(date = Date, level_ids = level_ids),
+        error = function(e) {
+          message("game_pks failed for ", Date, ": ", conditionMessage(e))
+          tibble()
+        }
+      )
+    })
   
-  mlb_teams <- game_log %>%
+  log_teams <- game_log %>%
     dplyr::select(Team, Level) %>%
     distinct()
-  
-  milb_to_mlb <- team_mapping %>%
-    pivot_longer(cols = -c(MLB_abbr, DSL_slot),
-                 names_to = "level",
-                 values_to = "milb_team") %>%
-    filter(!is.na(milb_team) & milb_team != "") %>%
-    dplyr::select(MLB_abbr, milb_team, level) %>%
-    mutate(Level_b = paste0("(", level, ")"))
 
-  milb_teams <- mlb_teams %>% 
+  milb_teams <- log_teams %>% 
     left_join(milb_to_mlb, by = c("Team" = "MLB_abbr", "Level" = "Level_b")) %>%
     filter(!is.na(milb_team)) %>%
     pull(milb_team) %>%
     unique()
 
-  taiwan_game_pks <- new_game_pks %>%
-    filter(gameType == "R") %>%
-    filter(teams.home.team.name %in% milb_teams |
-             teams.away.team.name %in% milb_teams | 
-             teams.home.team.name %in% mlb_teams | 
-             teams.away.team.name %in% mlb_teams)
-
-  # Fetch PBP data for new games
-  new_player_games <- map(
-    .x = taiwan_game_pks %>%
-      filter(status.codedGameState == "F") %>%
-      pull(game_pk),
-    ~mlb_pbp(game_pk = .x) # MLB api!!!!!!!!!!
-  ) %>%
-    bind_rows()
-
-  data <- player_info %>%
-    filter(full_name == player_name)
-
-  is_pitcher <- data$primary_position_name == "Pitcher"
-
-  if(is_pitcher) {
-    new_player_data <- new_player_games %>%
-      filter(matchup.pitcher.fullName == player_name)
+  taiwan_game_pks <- if (nrow(new_game_pks) == 0) {
+    new_game_pks
   } else {
-    new_player_data <- new_player_games %>%
-      filter(matchup.batter.fullName == player_name)
+    new_game_pks %>%
+      filter(gameType == "R", # regular season only
+             status.codedGameState == "F") %>% # finished games only
+      filter(teams.home.team.name %in% milb_teams |
+               teams.away.team.name %in% milb_teams)
   }
 
+  # Fetch PBP data for new games
+  new_player_data <- map(taiwan_game_pks$game_pk, \(pk) {
+    g <- tryCatch(mlb_pbp(game_pk = pk), error = function(e) NULL) #MLB API HERE!!!
+    if (is.null(g) || nrow(g) == 0) return(NULL)
+    if (is_pitcher) {
+      dplyr::filter(g, matchup.pitcher.fullName == player_name)
+    } else {
+      dplyr::filter(g, matchup.batter.fullName == player_name)
+    }
+  }) %>% 
+    bind_rows()
+
   # Combine with cached data
-  player_data <- if (!is.null(cached_data)) {
-    bind_rows(cached_data, new_player_data) %>%
-      distinct()  # Remove any duplicate rows
+  player_data <- if (!is.null(cached_data) && nrow(cached_data) > 0) {
+    cached_data %>% 
+      filter(!game_pk %in% new_player_data$game_pk) %>% 
+      bind_rows(new_player_data)
   } else {
     new_player_data
   }
-
-  # Save updated cache
-
-  saveRDS(player_data, pbp_file_path)
-  message("💾 Saved PBP data to ", pbp_file_path)
-
-  return(player_data)
+  
+  finish(player_data)
 }
 
 

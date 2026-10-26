@@ -1,5 +1,4 @@
 library(rvest)
-library(dplyr)
 
 get_player_transactions <- function(mlbam) {
   link <- paste0("https://www.milb.com/player/", mlbam)

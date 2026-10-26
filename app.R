@@ -32,6 +32,11 @@ source("get_game_log.r")
 source("get_pbp_data.r")
 source("get_player_name.r")
 
+player_info <- get_player_name()
+
+players_data <- player_info %>% 
+  select(id, full_name, level_abb, primary_position_name, team_name, photo_link, parent_org, org_rank, Mandarin, debut_year)
+
 ui <- dashboardPage(
   
   # Header
@@ -407,13 +412,6 @@ ui <- dashboardPage(
 
 server <- function(input, output, session) {
   
-  player_info <- get_player_name()
-  
-  
-  players_data <- player_info %>% 
-    select(id, full_name, level_abb, primary_position_name, team_name, photo_link, parent_org, org_rank, Mandarin, debut_year)
-  
-  
   #Create a cache for transactions
   transactions_cache <- reactiveValues(data = list())
   # game_log_cache <- reactiveValues(data = list())
@@ -574,8 +572,6 @@ server <- function(input, output, session) {
     game_logs <- NULL 
     
     tryCatch({
-      
-      cache_path <- paste0("cache/game_log_", mlbam_id, ".rds")
     
       showModal(modalDialog(
         title = paste0(player_name, " (", mandarin_name, ")"),
@@ -587,7 +583,10 @@ server <- function(input, output, session) {
       ))
       
       if (is.null(transactions_cache$data[[mlbam_id]])) {
-        transactions_cache$data[[mlbam_id]] <- get_player_transactions(mlbam_id)
+        transactions_cache$data[[mlbam_id]] <- tryCatch(
+          get_player_transactions(mlbam_id),
+          error = function(e) "<p>Transactions unavailable.</p>"
+        )
       }
       
       game_logs <- get_game_log(player_name, player_info, player_debut_year, get_current_season())
@@ -596,6 +595,9 @@ server <- function(input, output, session) {
           any_of("hitData.coordinates.coordY"),
           ~ -.
         ))
+      if (nrow(pbp_data) == 0 || !all(c("game_date", "home_level_name") %in% names(pbp_data))) {
+        stop("No pitch-by-pitch data for ", player_name)
+      }
       pbp_data_ordered <- pbp_data %>% 
         mutate(
           home_level_name_ordered = if ("home_level_name" %in% names(.)) {
@@ -639,10 +641,6 @@ server <- function(input, output, session) {
         unique()
       
       default_level <- level_order_full[level_order_full %in% levels_in_default_year][1]
-      
-      if (!("Message" %in% names(game_logs))) {
-        saveRDS(game_logs, file = cache_path)
-      }
       
       updatePickerInput(
         session = session,
@@ -1007,6 +1005,16 @@ server <- function(input, output, session) {
           k_zone_plot
         }
       })
+    }, error = function(e) {
+      message("Failed to load ", player_name, ": ", conditionMessage(e))
+      showModal(modalDialog(
+        title = paste0(player_name, " (", mandarin_name, ")"),
+        div(style = "text-align: center; color: #999; padding: 50px;",
+            icon("exclamation", style = "font-size: 3em; margin-bottom: 20px;"),
+            p("Data for this player isn't available yet. Please check back later.")),
+        easyClose = TRUE,
+        footer = modalButton("Close")
+      ))
     })
   })
 }

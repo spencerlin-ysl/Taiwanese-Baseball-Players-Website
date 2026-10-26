@@ -1,0 +1,36 @@
+name: refresh-cache
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: refresh-cache
+  cancel-in-progress: false
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::tidyverse
+            any::rvest
+            any::xml2
+            any::rlang
+            any::jsonlite
+            any::httr
+            any::glue
+            any::baseballr
+      - run: Rscript refresh.R
+      - run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add cache
+          git diff --cached --quiet || (git commit -m "Refresh cache" && git push)

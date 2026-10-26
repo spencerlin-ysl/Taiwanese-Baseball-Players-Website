@@ -1,20 +1,26 @@
 get_player_name <- function() {
   cache_dir <- "cache"
-  dir.create(cache_dir, showWarnings = FALSE)
   file_path <- file.path(cache_dir, paste0("player_info.rds"))
   
   if (file.exists(file_path)) {
-    file_age <- difftime(Sys.time(), file.info(file_path)$mtime, units = "days")
+    cached <- readRDS(file_path)
     
-    if (file_age <= 1) {
-      message("✅ Using cached player info (", round(file_age, 2), " days old)")
-      return(readRDS(file_path))
+    if (Sys.getenv("CACHE_ONLY") == "1") {
+      message("✅ CACHE ONLY: using ", file_path)
+      return(cached)
     }
     
+    stamp <- attr(cached, "fetched_at")
+    if (!is.null(stamp)) {
+      age_days <- as.numeric(difftime(Sys.time(), stamp, units = "days"))
+      if (age_days <= 1) {
+        message("✅ Using cached player info (", round(age_days, 2), " days old)")
+        return(cached)
+      }
+    }
   } else {
     # No cache - fetch all games
     message("🔄 No player info cache found. Fetching all players...")
-    cached_data <- NULL
   }
   
   
@@ -67,7 +73,7 @@ get_player_name <- function() {
   player_name <- data.frame(
     full_name  = character(length(player_links)),
     Mandarin = character(length(player_links)),
-    debut_year = integer(length(player_links)),
+    signing_year = integer(length(player_links)),
     stringsAsFactors = FALSE
   )
   
@@ -228,15 +234,24 @@ get_player_name <- function() {
     ) %>% 
     mutate(across(where(is.character), str_squish))
   
+  debut_year <- taiwan_player_ids %>%
+    transmute(id = as.integer(key_mlbam),
+              debut_year = as.integer(pro_played_first)) %>%
+    distinct(id, .keep_all = TRUE)
+  
   player_name_to_join <- player_name %>% 
-    select(name_first, Mandarin, debut_year) %>%
+    select(name_first, Mandarin, signing_year = signing_year) %>%
     distinct(name_first, .keep_all = TRUE)
   
-  player_info <- left_join(player_info, player_name_to_join, 
-                           by = c("use_name" = "name_first"))
+  player_info <- player_info %>% 
+    mutate(id = as.integer(id)) %>%
+    left_join(debut_year, by = "id") %>%
+    left_join(player_name_to_join, 
+              by = c("use_name" = "name_first"))
 
-  saveRDS(player_info, paste0(file_path, ".tmp"))
-  file.rename(paste0(file_path, ".tmp"), file_path)
+  tmp_path <- paste0(file_path, ".tmp")
+  player_info <- save_with_stamp(player_info, tmp_path)
+  file.rename(tmp_path, file_path)
   message("💾 Saved player info data to ", file_path)
   
   return(player_info)
@@ -245,4 +260,4 @@ get_player_name <- function() {
 # player_info <- get_player_name()
 # player_info <- readRDS('/Users/spencerlin/Documents/My projects/Taiwan Baseball Players/Taiwan_MLB_players/cache/player_info.rds')
 # player_info <- player_info %>% 
-#   mutate(debut_year = as.integer(debut_year))
+#   mutate(signing_year = as.integer(signing_year))

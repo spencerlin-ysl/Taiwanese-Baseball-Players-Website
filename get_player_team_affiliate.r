@@ -25,4 +25,4 @@ get_player_team_affiliate <- function(mlbam_id) {
     )
   }
 }
-get_player_team_affiliate(801179)
+#get_player_team_affiliate(801179)
